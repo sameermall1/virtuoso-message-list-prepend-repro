@@ -1,11 +1,14 @@
 # Message List: the reader's row moves after a `'prepend'`
 
-A minimal repro for [petyosi/react-virtuoso#1523](https://github.com/petyosi/react-virtuoso/issues/1523). It uses `@virtuoso.dev/message-list` 1.18.1 with an empty license key, so run it as a dev build.
+A minimal repro for [petyosi/react-virtuoso#1523](https://github.com/petyosi/react-virtuoso/issues/1523), using `@virtuoso.dev/message-list` 1.18.1.
 
 ```bash
 npm install
-npm run dev   # http://localhost:5199/?mode=shrink-effect
+npm run dev         # http://localhost:5199/?mode=late-measure
+npm run typecheck   # tsc, strict
 ```
+
+Without a license key the list only renders on localhost. On StackBlitz or any other host it shows "missing a license key" instead of rows, so set `VITE_VIRTUOSO_LICENSE_KEY` there.
 
 Scroll to the top. After a 400ms fake fetch, the app prepends 20 older rows with the `'prepend'` scroll modifier (declarative `data` prop, `increaseViewportBy={200}`, the list owns the scroller). The header reports how far the row you were reading moved after the list's prepend correction, with no further user scroll.
 

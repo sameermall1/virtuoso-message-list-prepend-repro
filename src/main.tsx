@@ -1,6 +1,21 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { createRoot } from 'react-dom/client';
-import { VirtuosoMessageList, VirtuosoMessageListLicense } from '@virtuoso.dev/message-list';
+import {
+  VirtuosoMessageList,
+  VirtuosoMessageListLicense,
+  type DataWithScrollModifier,
+  type ItemContent,
+  type VirtuosoMessageListMethods,
+} from '@virtuoso.dev/message-list';
 
 const MODES = {
   uniform: 'Control. Every row is 300px from its first render.',
@@ -13,10 +28,61 @@ const MODES = {
   'shrink-notify': 'shrink-effect, plus notifyItemsChanged({ scrollToBottom: false }) after each clamp.',
   'late-measure':
     'No row ever changes height. The first page is 1000px rows. In each older page the row just above the reader is 150px, the one above it 250px, the rest 600px.',
-};
+} as const;
+
+type Mode = keyof typeof MODES;
+
+interface Row {
+  id: string;
+  seq: number;
+  height: number;
+  tall?: boolean;
+}
+
+interface ListContext {
+  notify: () => void;
+  clampWithAnchor: (id: string) => void;
+}
+
+type List = VirtuosoMessageListMethods<Row, ListContext>;
+
+interface RowTrace {
+  id: string;
+  estimate: number | null;
+  first: number | null;
+  firstAt: number | null;
+  h150: number | null;
+  h500: number | null;
+}
+
+interface Frame {
+  t: number;
+  st: number;
+  anchorTop: number | null;
+}
+
+interface Trace {
+  mode: Mode;
+  anchorId: string;
+  anchorTop0: number;
+  finalDrift: number | null;
+  maxDrift: number;
+  frames: Frame[];
+  rows: RowTrace[];
+}
+
+declare global {
+  interface Window {
+    __list?: List | null;
+    __traces?: Trace[];
+  }
+}
+
+const isMode = (value: string | null): value is Mode => value !== null && Object.hasOwn(MODES, value);
 
 const params = new URLSearchParams(window.location.search);
-const MODE = MODES[params.get('mode')] ? params.get('mode') : 'shrink-effect';
+const modeParam = params.get('mode');
+const MODE: Mode = isMode(modeParam) ? modeParam : 'shrink-effect';
 const PAGE_SIZE = 20;
 const MAX_PAGES = 8;
 const FETCH_MS = 400;
@@ -25,7 +91,7 @@ const CLAMP_HEIGHT = 240;
 const FIRST_SEQ = 1000;
 // ?delay=100 postpones effect-based clamps, like a passive effect that runs late on a busy main thread.
 const CLAMP_DELAY_MS = Number(params.get('delay') ?? 0);
-const afterDelay = (callback) => {
+const afterDelay = (callback: () => void): (() => void) | undefined => {
   if (!CLAMP_DELAY_MS) {
     callback();
     return undefined;
@@ -34,11 +100,11 @@ const afterDelay = (callback) => {
   return () => clearTimeout(timeout);
 };
 
-const clampedIds = new Set();
+const clampedIds = new Set<string>();
 // The row at the top of the viewport when the current prepend started, while its trace runs.
-let readerId = null;
+let readerId: string | null = null;
 
-const makeRow = (seq) => {
+const makeRow = (seq: number): Row => {
   const id = `row-${seq}`;
   if (MODE === 'uniform') return { id, seq, height: 300 };
   if (MODE === 'late-measure') {
@@ -49,9 +115,15 @@ const makeRow = (seq) => {
   return { id, seq, height: seq % 3 === 0 ? 1200 : 300, tall: seq % 3 === 0 };
 };
 
-const rowsBetween = (start, end) => Array.from({ length: end - start }, (_, i) => makeRow(start + i));
+const rowsBetween = (start: number, end: number): Row[] =>
+  Array.from({ length: end - start }, (_, i) => makeRow(start + i));
 
-const Box = ({ height, label }) => (
+interface BoxProps {
+  height: number;
+  label: string;
+}
+
+const Box = ({ height, label }: BoxProps) => (
   <div
     style={{
       height,
@@ -65,14 +137,20 @@ const Box = ({ height, label }) => (
   </div>
 );
 
-const Clamp = ({ clamped, innerRef, children }) => (
+interface ClampProps {
+  clamped: boolean;
+  innerRef?: RefObject<HTMLDivElement | null>;
+  children: ReactNode;
+}
+
+const Clamp = ({ clamped, innerRef, children }: ClampProps) => (
   <div ref={innerRef} style={clamped ? { maxHeight: CLAMP_HEIGHT, overflow: 'hidden' } : undefined}>
     {children}
   </div>
 );
 
-const useClamp = (useSomeEffect) => {
-  const ref = useRef(null);
+const useClamp = (useSomeEffect: typeof useEffect): [RefObject<HTMLDivElement | null>, boolean] => {
+  const ref = useRef<HTMLDivElement>(null);
   const [clamped, setClamped] = useState(false);
   useSomeEffect(() => {
     if (useSomeEffect === useLayoutEffect) {
@@ -86,7 +164,15 @@ const useClamp = (useSomeEffect) => {
   return [ref, clamped];
 };
 
-const EffectClampRow = ({ row }) => {
+interface RowProps {
+  row: Row;
+}
+
+interface RowWithContextProps extends RowProps {
+  context: ListContext;
+}
+
+const EffectClampRow = ({ row }: RowProps) => {
   const [ref, clamped] = useClamp(useEffect);
   return (
     <Clamp innerRef={ref} clamped={clamped}>
@@ -95,7 +181,7 @@ const EffectClampRow = ({ row }) => {
   );
 };
 
-const LayoutClampRow = ({ row }) => {
+const LayoutClampRow = ({ row }: RowProps) => {
   const [ref, clamped] = useClamp(useLayoutEffect);
   return (
     <Clamp innerRef={ref} clamped={clamped}>
@@ -104,7 +190,7 @@ const LayoutClampRow = ({ row }) => {
   );
 };
 
-const NotifyClampRow = ({ row, context }) => {
+const NotifyClampRow = ({ row, context }: RowWithContextProps) => {
   const [ref, clamped] = useClamp(useEffect);
   useEffect(() => {
     if (clamped) context.notify();
@@ -116,8 +202,8 @@ const NotifyClampRow = ({ row, context }) => {
   );
 };
 
-const AnchoredClampRow = ({ row, context }) => {
-  const ref = useRef(null);
+const AnchoredClampRow = ({ row, context }: RowWithContextProps) => {
+  const ref = useRef<HTMLDivElement>(null);
   const clamped = clampedIds.has(row.id);
   useEffect(() => {
     if (clamped) return undefined;
@@ -132,7 +218,7 @@ const AnchoredClampRow = ({ row, context }) => {
   );
 };
 
-const RowBody = ({ row, context }) => {
+const RowBody = ({ row, context }: RowWithContextProps) => {
   if (!row.tall) return <Box height={row.height} label={`${row.id} — ${row.height}px`} />;
   if (MODE === 'shrink-effect') return <EffectClampRow row={row} />;
   if (MODE === 'shrink-layout') return <LayoutClampRow row={row} />;
@@ -145,7 +231,7 @@ const RowBody = ({ row, context }) => {
   );
 };
 
-const ItemContent = ({ data, context }) => (
+const RowContent: ItemContent<Row, ListContext> = ({ data, context }) => (
   <div data-row-id={data.id} style={{ padding: '0 16px' }}>
     <RowBody row={data} context={context} />
   </div>
@@ -153,18 +239,18 @@ const ItemContent = ({ data, context }) => (
 
 // Where the list places a row relative to the viewport top: its offset in the list's size cache minus scrollTop.
 // Unlike a DOM read, this still works after the row unmounts because it moved out of the rendered window.
-const rowTop = (list, id) => {
+const rowTop = (list: List, scroller: HTMLElement, id: string): number | null => {
   const rows = list.data.get();
   const index = rows.findIndex((row) => row.id === id);
   if (index < 0) return null;
   let offset = 0;
-  for (let i = 0; i < index; i++) offset += list.height(rows[i]);
-  return offset - list.scrollerElement().scrollTop;
+  for (const row of rows.slice(0, index)) offset += list.height(row);
+  return offset - scroller.scrollTop;
 };
 
-const firstVisibleIndex = (scroller) => {
+const firstVisibleIndex = (scroller: HTMLElement): number => {
   const top = scroller.getBoundingClientRect().top;
-  const visible = [...scroller.querySelectorAll('[data-index]')]
+  const visible = [...scroller.querySelectorAll<HTMLElement>('[data-index]')]
     .filter((element) => element.getBoundingClientRect().bottom > top + 1)
     .map((element) => Number(element.dataset.index));
   return visible.length ? Math.min(...visible) : 0;
@@ -172,48 +258,55 @@ const firstVisibleIndex = (scroller) => {
 
 // Records where the row at the top of the viewport sits before the prepend and for TRACE_MS after it, plus each
 // prepended row's estimate (list.height) and its rendered height at first measurement, +150ms and +500ms.
-const startTrace = (list, page, onDone) => {
+const startTrace = (list: List, page: Row[], onDone: (trace: Trace) => void) => {
   const scroller = list.scrollerElement();
+  if (!scroller) return;
   const scrollerTop = scroller.getBoundingClientRect().top;
-  const anchorElement = [...scroller.querySelectorAll('[data-row-id]')].find(
+  const anchorId = [...scroller.querySelectorAll<HTMLElement>('[data-row-id]')].find(
     (element) => element.getBoundingClientRect().bottom > scrollerTop + 1
-  );
-  if (!anchorElement) return;
-  const anchorId = anchorElement.dataset.rowId;
+  )?.dataset.rowId;
+  if (!anchorId) return;
+  const anchorTop = rowTop(list, scroller, anchorId);
+  if (anchorTop === null) return;
   readerId = anchorId;
+  const anchorTop0 = Math.round(anchorTop);
   const t0 = performance.now();
   const at = () => Math.round(performance.now() - t0);
-  const anchorTop0 = Math.round(rowTop(list, anchorId));
-  const frames = [];
-  const rows = new Map(
+  const frames: Frame[] = [];
+  const rows = new Map<string, RowTrace>(
     page.map((row) => [row.id, { id: row.id, estimate: null, first: null, firstAt: null, h150: null, h500: null }])
   );
 
-  const heightOf = (id) => {
-    const element = scroller.querySelector(`[data-row-id="${id}"]`);
-    return element ? Math.round(element.parentElement.getBoundingClientRect().height) : null;
+  const heightOf = (id: string): number | null => {
+    const wrapper = scroller.querySelector(`[data-row-id="${id}"]`)?.parentElement;
+    return wrapper ? Math.round(wrapper.getBoundingClientRect().height) : null;
   };
   // A row can unmount before the next ResizeObserver callback (when the jump moves it out of the rendered window), so
   // its first height is read when it is inserted.
-  const recordFirst = (row, height) => {
+  const recordFirst = (row: RowTrace, height: number) => {
     if (row.first !== null || height <= 0) return;
     row.first = height;
     row.firstAt = at();
     setTimeout(() => (row.h150 = heightOf(row.id)), 150);
     setTimeout(() => (row.h500 = heightOf(row.id)), 500);
   };
+  const traceFor = (wrapper: Element): RowTrace | undefined => {
+    const id = wrapper.querySelector<HTMLElement>('[data-row-id]')?.dataset.rowId;
+    return id === undefined ? undefined : rows.get(id);
+  };
   const resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
-      const row = rows.get(entry.target.querySelector('[data-row-id]')?.dataset.rowId);
-      if (row) recordFirst(row, Math.round(entry.borderBoxSize[0].blockSize));
+      const row = traceFor(entry.target);
+      const size = entry.borderBoxSize[0];
+      if (row && size) recordFirst(row, Math.round(size.blockSize));
     }
   });
   const observeNew = () => {
-    for (const wrapper of scroller.querySelectorAll('[data-index]')) {
-      const id = wrapper.querySelector('[data-row-id]')?.dataset.rowId;
-      if (rows.has(id) && !wrapper.dataset.traced) {
+    for (const wrapper of scroller.querySelectorAll<HTMLElement>('[data-index]')) {
+      const row = traceFor(wrapper);
+      if (row && !wrapper.dataset.traced) {
         wrapper.dataset.traced = '1';
-        recordFirst(rows.get(id), Math.round(wrapper.getBoundingClientRect().height));
+        recordFirst(row, Math.round(wrapper.getBoundingClientRect().height));
         resizeObserver.observe(wrapper, { box: 'border-box' });
       }
     }
@@ -224,12 +317,14 @@ const startTrace = (list, page, onDone) => {
   let estimatesRead = false;
   const frame = () => {
     const t = at();
-    if (!estimatesRead && list.data.find((row) => row.id === page[0].id)) {
+    if (!estimatesRead && list.data.find((row) => row.id === page[0]?.id)) {
       estimatesRead = true;
-      const current = list.data.get();
-      for (const row of current) if (rows.has(row.id)) rows.get(row.id).estimate = list.height(row);
+      for (const row of list.data.get()) {
+        const trace = rows.get(row.id);
+        if (trace) trace.estimate = list.height(row);
+      }
     }
-    const top = rowTop(list, anchorId);
+    const top = rowTop(list, scroller, anchorId);
     frames.push({ t, st: Math.round(scroller.scrollTop), anchorTop: top === null ? null : Math.round(top) });
     if (t < TRACE_MS) {
       requestAnimationFrame(frame);
@@ -240,10 +335,11 @@ const startTrace = (list, page, onDone) => {
     readerId = null;
     // Until the list applies its 'prepend' scroll correction, the cache offsets already include the new rows while
     // scrollTop does not, so only frames from the correction onwards are compared.
-    const correction = frames.findIndex((f) => Math.abs(f.st - frames[0].st) > 1);
-    const drifts = (correction < 0 ? [] : frames.slice(correction))
-      .filter((f) => f.anchorTop !== null)
-      .map((f) => f.anchorTop - anchorTop0);
+    const startSt = frames[0]?.st ?? 0;
+    const correction = frames.findIndex((f) => Math.abs(f.st - startSt) > 1);
+    const drifts = (correction < 0 ? [] : frames.slice(correction)).flatMap((f) =>
+      f.anchorTop === null ? [] : [f.anchorTop - anchorTop0]
+    );
     const maxDrift = drifts.reduce((max, drift) => (Math.abs(drift) > Math.abs(max) ? drift : max), 0);
     onDone({
       mode: MODE,
@@ -259,14 +355,14 @@ const startTrace = (list, page, onDone) => {
 };
 
 const App = () => {
-  const listRef = useRef(null);
+  const listRef = useRef<List>(null);
   const loadingRef = useRef(false);
   const oldestSeqRef = useRef(FIRST_SEQ);
-  const [traces, setTraces] = useState([]);
+  const [traces, setTraces] = useState<Trace[]>([]);
   useEffect(() => {
     window.__list = listRef.current;
   });
-  const [listData, setListData] = useState(() => ({
+  const [listData, setListData] = useState<DataWithScrollModifier<Row>>(() => ({
     data: rowsBetween(FIRST_SEQ, FIRST_SEQ + PAGE_SIZE),
     scrollModifier: { type: 'item-location', location: { index: 'LAST', align: 'end' } },
   }));
@@ -275,28 +371,34 @@ const App = () => {
     if (loadingRef.current || oldestSeqRef.current <= FIRST_SEQ - PAGE_SIZE * MAX_PAGES) return;
     loadingRef.current = true;
     setTimeout(() => {
+      const list = listRef.current;
+      if (!list) {
+        loadingRef.current = false;
+        return;
+      }
       const end = oldestSeqRef.current;
       oldestSeqRef.current = end - PAGE_SIZE;
       const page = rowsBetween(end - PAGE_SIZE, end);
-      startTrace(listRef.current, page, (trace) => {
+      startTrace(list, page, (trace) => {
         window.__traces = [...(window.__traces ?? []), trace];
         setTraces((previous) => [...previous, trace]);
         loadingRef.current = false;
       });
-      setListData((previous) => ({ data: [...page, ...previous.data], scrollModifier: 'prepend' }));
+      setListData((previous) => ({ data: [...page, ...(previous.data ?? [])], scrollModifier: 'prepend' }));
     }, FETCH_MS);
   }, []);
 
-  const context = useMemo(
+  const context = useMemo<ListContext>(
     () => ({
       notify: () => listRef.current?.notifyItemsChanged({ scrollToBottom: false }),
       clampWithAnchor: (id) => {
         const list = listRef.current;
-        if (!list) return;
+        const scroller = list?.scrollerElement();
+        if (!list || !scroller) return;
         clampedIds.add(id);
         // Mid-prepend, the first row in the DOM can be a new row, so anchor on the row the user was reading.
         const readerIndex = readerId === null ? -1 : list.data.findIndex((row) => row.id === readerId);
-        const anchorIndex = readerIndex >= 0 ? readerIndex : firstVisibleIndex(list.scrollerElement());
+        const anchorIndex = readerIndex >= 0 ? readerIndex : firstVisibleIndex(scroller);
         list.data.mapWithAnchor((row) => (row.id === id ? { ...row } : row), anchorIndex);
       },
     }),
@@ -326,15 +428,15 @@ const App = () => {
           ))}
         </div>
       </header>
-      <VirtuosoMessageListLicense licenseKey="">
-        <VirtuosoMessageList
+      <VirtuosoMessageListLicense licenseKey={import.meta.env.VITE_VIRTUOSO_LICENSE_KEY ?? ''}>
+        <VirtuosoMessageList<Row, ListContext>
           ref={listRef}
           style={{ flex: 1 }}
           data={listData}
           context={context}
           itemIdentity={(row) => row.id}
           computeItemKey={({ data }) => data.id}
-          ItemContent={ItemContent}
+          ItemContent={RowContent}
           increaseViewportBy={200}
           onScroll={({ listOffset }) => {
             if (listOffset > -100) loadOlder();
@@ -345,4 +447,6 @@ const App = () => {
   );
 };
 
-createRoot(document.getElementById('root')).render(<App />);
+const root = document.getElementById('root');
+if (!root) throw new Error('Missing #root element');
+createRoot(root).render(<App />);
